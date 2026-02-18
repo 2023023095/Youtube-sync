@@ -4,6 +4,7 @@ import { io } from 'socket.io-client'
 
 const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || 'https://youtube-sync-two.vercel.app').replace(/\/$/, '')
 const WS_URL = (import.meta.env.VITE_WS_URL || '').replace(/\/$/, '')
+const FALLBACK_SYNC_INTERVAL_MS = 2500
 
 const getStoredUserId = () => {
   const key = 'audio-sync-user-id'
@@ -48,8 +49,10 @@ function App() {
   const lastPlaybackSeqRef = useRef(0)
   const isPlayerReadyRef = useRef(false)
   const pendingActionRef = useRef(null)
+  const pendingPositionRef = useRef(null)
   const loadedVideoIdRef = useRef('')
   const socketRef = useRef(null)
+  const [isSocketConnected, setIsSocketConnected] = useState(false)
 
   const currentUser = useMemo(() => users.find((user) => user.id === userId), [users, userId])
   const isHost = Boolean(currentUser?.isHost)
@@ -93,6 +96,54 @@ function App() {
     }
   }
 
+  const seekToPosition = (positionSec) => {
+    if (typeof positionSec !== 'number' || !Number.isFinite(positionSec) || positionSec < 0) {
+      return
+    }
+
+    const targetMediaType = mediaTypeRef.current
+    if (targetMediaType === 'local' && audioRef.current) {
+      audioRef.current.currentTime = positionSec
+      return
+    }
+
+    if (!playerRef.current || !isPlayerReadyRef.current) {
+      pendingPositionRef.current = positionSec
+      return
+    }
+
+    playerRef.current.seekTo(positionSec, true)
+  }
+
+  const applyPlaybackStatus = (status, positionSec) => {
+    seekToPosition(positionSec)
+
+    const targetMediaType = mediaTypeRef.current
+
+    if (targetMediaType === 'local' && audioRef.current) {
+      if (status === 'playing') {
+        audioRef.current.play().catch(() => {})
+        setIsPlaying(true)
+      } else if (status === 'paused') {
+        audioRef.current.pause()
+        setIsPlaying(false)
+      } else {
+        audioRef.current.pause()
+        audioRef.current.currentTime = 0
+        setIsPlaying(false)
+      }
+      return
+    }
+
+    if (status === 'playing') {
+      applyPlayerAction('play')
+    } else if (status === 'paused') {
+      applyPlayerAction('pause')
+    } else {
+      applyPlayerAction('stop')
+    }
+  }
+
   const createYouTubePlayer = (videoId) => {
     if (!videoId) {
       return
@@ -126,6 +177,11 @@ function App() {
         onReady: () => {
           isPlayerReadyRef.current = true
           loadedVideoIdRef.current = videoId
+
+          if (typeof pendingPositionRef.current === 'number') {
+            playerRef.current.seekTo(pendingPositionRef.current, true)
+            pendingPositionRef.current = null
+          }
 
           if (pendingActionRef.current) {
             const action = pendingActionRef.current
@@ -196,29 +252,7 @@ function App() {
 
     lastPlaybackSeqRef.current = playback.seq
 
-    const targetMediaType = room.media?.type || mediaTypeRef.current
-    if (targetMediaType === 'local' && audioRef.current) {
-      if (playback.status === 'playing') {
-        audioRef.current.play().catch(() => {})
-        setIsPlaying(true)
-      } else if (playback.status === 'paused') {
-        audioRef.current.pause()
-        setIsPlaying(false)
-      } else {
-        audioRef.current.pause()
-        audioRef.current.currentTime = 0
-        setIsPlaying(false)
-      }
-      return
-    }
-
-    if (playback.status === 'playing') {
-      applyPlayerAction('play')
-    } else if (playback.status === 'paused') {
-      applyPlayerAction('pause')
-    } else {
-      applyPlayerAction('stop')
-    }
+    applyPlaybackStatus(playback.status, playback.positionSec)
   }
 
   const refreshRoomState = useCallback(async () => {
@@ -263,7 +297,11 @@ function App() {
     }
 
     const handleConnect = () => {
+      setIsSocketConnected(true)
       joinRoomChannel()
+    }
+    const handleDisconnect = () => {
+      setIsSocketConnected(false)
     }
 
     const handleRoomUpdated = (event) => {
@@ -278,13 +316,9 @@ function App() {
         return
       }
 
-      if (event.action === 'play') {
-        applyPlayerAction('play')
-      } else if (event.action === 'pause') {
-        applyPlayerAction('pause')
-      } else if (event.action === 'stop') {
-        applyPlayerAction('stop')
-      }
+      const status = event.action === 'play' ? 'playing' : event.action === 'pause' ? 'paused' : 'stopped'
+      applyPlaybackStatus(status, event.positionSec)
+      refreshRoomState()
     }
 
     if (socket.connected) {
@@ -292,16 +326,33 @@ function App() {
     }
 
     socket.on('connect', handleConnect)
+    socket.on('disconnect', handleDisconnect)
     socket.on('room-updated', handleRoomUpdated)
     socket.on('control-event', handleControlEvent)
 
     return () => {
       socket.off('connect', handleConnect)
+      socket.off('disconnect', handleDisconnect)
       socket.off('room-updated', handleRoomUpdated)
       socket.off('control-event', handleControlEvent)
       socket.emit('leave-room-channel', { roomId, userId })
+      setIsSocketConnected(false)
     }
   }, [isInRoom, roomId, refreshRoomState, userId])
+
+  useEffect(() => {
+    if (!isInRoom || !roomId || isSocketConnected) {
+      return
+    }
+
+    const interval = setInterval(() => {
+      refreshRoomState()
+    }, FALLBACK_SYNC_INTERVAL_MS)
+
+    return () => {
+      clearInterval(interval)
+    }
+  }, [isInRoom, roomId, isSocketConnected, refreshRoomState])
 
   const notifyRoomUpdated = useCallback(
     (eventType) => {
@@ -474,11 +525,29 @@ function App() {
       return
     }
 
+    const getCurrentPositionSec = () => {
+      const targetMediaType = mediaTypeRef.current
+
+      if (targetMediaType === 'local' && audioRef.current) {
+        const value = audioRef.current.currentTime
+        return Number.isFinite(value) && value >= 0 ? value : 0
+      }
+
+      if (playerRef.current && isPlayerReadyRef.current && typeof playerRef.current.getCurrentTime === 'function') {
+        const value = playerRef.current.getCurrentTime()
+        return Number.isFinite(value) && value >= 0 ? value : 0
+      }
+
+      return 0
+    }
+
+    const positionSec = action === 'stop' ? 0 : getCurrentPositionSec()
+
     try {
-      const data = await apiPost('control', { roomId, userId, action })
+      const data = await apiPost('control', { roomId, userId, action, positionSec })
       syncRoomState(data.room, roomId)
       if (socketRef.current) {
-        socketRef.current.emit('broadcast-control', { roomId, userId, action })
+        socketRef.current.emit('broadcast-control', { roomId, userId, action, positionSec })
       }
       notifyRoomUpdated('control')
     } catch (controlError) {

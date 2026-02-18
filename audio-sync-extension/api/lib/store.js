@@ -90,7 +90,7 @@ export const sanitizeRoom = (room) => {
     hostUserId: room.hostUserId,
     users: room.users ?? [],
     media: room.media ?? null,
-    playback: room.playback ?? { seq: 0, status: 'stopped', actorId: null, updatedAt: Date.now() }
+    playback: room.playback ?? { seq: 0, status: 'stopped', positionSec: 0, actorId: null, updatedAt: Date.now() }
   }
 }
 

@@ -41,6 +41,7 @@ export default async function handler(req, res) {
     room.playback = {
       seq: (room.playback?.seq ?? 0) + 1,
       status: 'stopped',
+      positionSec: 0,
       actorId: userId,
       updatedAt: now
     }

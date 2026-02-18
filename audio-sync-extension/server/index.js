@@ -51,7 +51,7 @@ io.on('connection', (socket) => {
     });
   });
 
-  socket.on('broadcast-control', ({ roomId, userId, action }) => {
+  socket.on('broadcast-control', ({ roomId, userId, action, positionSec }) => {
     if (!roomId || !action) {
       return;
     }
@@ -60,6 +60,7 @@ io.on('connection', (socket) => {
       roomId,
       userId: userId || null,
       action,
+      positionSec: typeof positionSec === 'number' ? positionSec : 0,
       updatedAt: Date.now()
     });
   });

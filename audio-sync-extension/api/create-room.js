@@ -37,6 +37,7 @@ export default async function handler(req, res) {
       playback: {
         seq: 0,
         status: 'stopped',
+        positionSec: 0,
         actorId: null,
         updatedAt: now
       }
