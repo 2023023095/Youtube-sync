@@ -51,6 +51,19 @@ io.on('connection', (socket) => {
     });
   });
 
+  socket.on('broadcast-control', ({ roomId, userId, action }) => {
+    if (!roomId || !action) {
+      return;
+    }
+
+    socket.to(`room:${roomId}`).emit('control-event', {
+      roomId,
+      userId: userId || null,
+      action,
+      updatedAt: Date.now()
+    });
+  });
+
   socket.on('create-room', ({ roomId, username }) => {
     const room = {
       id: roomId,

@@ -255,11 +255,7 @@ function App() {
       return
     }
 
-    const socket =
-      socketRef.current ??
-      io(WS_URL, {
-        transports: ['websocket']
-      })
+    const socket = socketRef.current ?? io(WS_URL)
     socketRef.current = socket
 
     const joinRoomChannel = () => {
@@ -277,16 +273,32 @@ function App() {
       refreshRoomState()
     }
 
+    const handleControlEvent = (event) => {
+      if (!event || event.roomId !== roomId || !event.action) {
+        return
+      }
+
+      if (event.action === 'play') {
+        applyPlayerAction('play')
+      } else if (event.action === 'pause') {
+        applyPlayerAction('pause')
+      } else if (event.action === 'stop') {
+        applyPlayerAction('stop')
+      }
+    }
+
     if (socket.connected) {
       handleConnect()
     }
 
     socket.on('connect', handleConnect)
     socket.on('room-updated', handleRoomUpdated)
+    socket.on('control-event', handleControlEvent)
 
     return () => {
       socket.off('connect', handleConnect)
       socket.off('room-updated', handleRoomUpdated)
+      socket.off('control-event', handleControlEvent)
       socket.emit('leave-room-channel', { roomId, userId })
     }
   }, [isInRoom, roomId, refreshRoomState, userId])
@@ -465,6 +477,9 @@ function App() {
     try {
       const data = await apiPost('control', { roomId, userId, action })
       syncRoomState(data.room, roomId)
+      if (socketRef.current) {
+        socketRef.current.emit('broadcast-control', { roomId, userId, action })
+      }
       notifyRoomUpdated('control')
     } catch (controlError) {
       setError(controlError.message)
