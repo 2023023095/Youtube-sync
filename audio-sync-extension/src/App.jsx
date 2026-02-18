@@ -144,6 +144,21 @@ function App() {
     }
   }
 
+  const getEffectivePlaybackPosition = (playback) => {
+    if (!playback) {
+      return 0
+    }
+
+    const base = typeof playback.positionSec === 'number' && Number.isFinite(playback.positionSec) ? playback.positionSec : 0
+    if (playback.status !== 'playing') {
+      return Math.max(0, base)
+    }
+
+    const updatedAt = typeof playback.updatedAt === 'number' && Number.isFinite(playback.updatedAt) ? playback.updatedAt : 0
+    const elapsedSec = updatedAt > 0 ? Math.max(0, (Date.now() - updatedAt) / 1000) : 0
+    return Math.max(0, base + elapsedSec)
+  }
+
   const createYouTubePlayer = (videoId) => {
     if (!videoId) {
       return
@@ -252,7 +267,7 @@ function App() {
 
     lastPlaybackSeqRef.current = playback.seq
 
-    applyPlaybackStatus(playback.status, playback.positionSec)
+    applyPlaybackStatus(playback.status, getEffectivePlaybackPosition(playback))
   }
 
   const refreshRoomState = useCallback(async () => {
@@ -317,7 +332,12 @@ function App() {
       }
 
       const status = event.action === 'play' ? 'playing' : event.action === 'pause' ? 'paused' : 'stopped'
-      applyPlaybackStatus(status, event.positionSec)
+      const playback = {
+        status,
+        positionSec: event.positionSec,
+        updatedAt: event.updatedAt
+      }
+      applyPlaybackStatus(status, getEffectivePlaybackPosition(playback))
       refreshRoomState()
     }
 
