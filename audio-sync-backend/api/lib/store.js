@@ -7,11 +7,19 @@ const isRedisConfigured = Boolean(
   process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN
 )
 const redis = isRedisConfigured ? Redis.fromEnv() : null
+const requireRedis = process.env.REQUIRE_REDIS === 'true'
 
 export const ensureStoreAvailable = () => {
-  if (process.env.VERCEL && !isRedisConfigured) {
+  if (requireRedis && !isRedisConfigured) {
     throw new Error(
-      'Vercel Redis is not configured. Add UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN.'
+      'Redis is required but not configured. Add UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN.'
+    )
+  }
+
+  if (!isRedisConfigured && !globalThis.__audioSyncStoreFallbackWarned) {
+    globalThis.__audioSyncStoreFallbackWarned = true
+    console.warn(
+      '[audio-sync] Redis is not configured. Falling back to in-memory store; data is ephemeral on serverless instances.'
     )
   }
 }
@@ -83,3 +91,9 @@ export const touchUser = (room, userId) => {
 
   return room
 }
+
+export const getStoreStatus = () => ({
+  mode: isRedisConfigured ? 'redis' : 'memory',
+  isRedisConfigured,
+  requireRedis
+})
