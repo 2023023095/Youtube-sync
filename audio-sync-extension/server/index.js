@@ -25,6 +25,32 @@ const getRoomState = (room) => ({
 io.on('connection', (socket) => {
   console.log('User connected:', socket.id);
 
+  socket.on('join-room-channel', ({ roomId }) => {
+    if (!roomId) {
+      return;
+    }
+    socket.join(`room:${roomId}`);
+  });
+
+  socket.on('leave-room-channel', ({ roomId }) => {
+    if (!roomId) {
+      return;
+    }
+    socket.leave(`room:${roomId}`);
+  });
+
+  socket.on('notify-room-update', ({ roomId, userId, eventType }) => {
+    if (!roomId) {
+      return;
+    }
+    socket.to(`room:${roomId}`).emit('room-updated', {
+      roomId,
+      userId: userId || null,
+      eventType: eventType || 'update',
+      updatedAt: Date.now()
+    });
+  });
+
   socket.on('create-room', ({ roomId, username }) => {
     const room = {
       id: roomId,

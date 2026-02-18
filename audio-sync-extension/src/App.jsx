@@ -1,10 +1,9 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { v4 as uuidv4 } from 'uuid'
+import { io } from 'socket.io-client'
 
 const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || 'https://youtube-sync-two.vercel.app').replace(/\/$/, '')
-const POLL_INTERVAL_ACTIVE_MS = 1500
-const POLL_INTERVAL_IDLE_MS = 5000
-const POLL_INTERVAL_HIDDEN_MS = 15000
+const WS_URL = (import.meta.env.VITE_WS_URL || '').replace(/\/$/, '')
 
 const getStoredUserId = () => {
   const key = 'audio-sync-user-id'
@@ -50,7 +49,7 @@ function App() {
   const isPlayerReadyRef = useRef(false)
   const pendingActionRef = useRef(null)
   const loadedVideoIdRef = useRef('')
-  const playbackStatusRef = useRef('stopped')
+  const socketRef = useRef(null)
 
   const currentUser = useMemo(() => users.find((user) => user.id === userId), [users, userId])
   const isHost = Boolean(currentUser?.isHost)
@@ -191,8 +190,6 @@ function App() {
       return
     }
 
-    playbackStatusRef.current = playback.status || 'stopped'
-
     if (playback.seq === lastPlaybackSeqRef.current) {
       return
     }
@@ -224,56 +221,97 @@ function App() {
     }
   }
 
+  const refreshRoomState = useCallback(async () => {
+    if (!isInRoom || !roomId) {
+      return
+    }
+
+    try {
+      const response = await fetch(
+        `${API_BASE_URL}/api/room?roomId=${encodeURIComponent(roomId)}&userId=${encodeURIComponent(userId)}`
+      )
+      const data = await parseResponse(response)
+      syncRoomState(data.room, roomId)
+    } catch (pollError) {
+      setError(pollError.message)
+    }
+  }, [isInRoom, roomId, userId])
+
   useEffect(() => {
     if (!isInRoom || !roomId) {
       return
     }
 
-    let stopped = false
-    let timeoutId = null
-
-    const getPollDelay = () => {
-      if (document.hidden) {
-        return POLL_INTERVAL_HIDDEN_MS
-      }
-      if (playbackStatusRef.current === 'playing') {
-        return POLL_INTERVAL_ACTIVE_MS
-      }
-      return POLL_INTERVAL_IDLE_MS
-    }
-
-    const pollRoom = async () => {
-      try {
-        const response = await fetch(
-          `${API_BASE_URL}/api/room?roomId=${encodeURIComponent(roomId)}&userId=${encodeURIComponent(userId)}`
-        )
-        const data = await parseResponse(response)
-        if (!stopped) {
-          syncRoomState(data.room, roomId)
-        }
-      } catch (pollError) {
-        if (!stopped) {
-          setError(pollError.message)
-        }
-      } finally {
-        if (!stopped) {
-          timeoutId = setTimeout(pollRoom, getPollDelay())
-        }
-      }
-    }
-
-    pollRoom()
+    refreshRoomState()
+    window.addEventListener('online', refreshRoomState)
 
     return () => {
-      stopped = true
-      if (timeoutId) {
-        clearTimeout(timeoutId)
-      }
+      window.removeEventListener('online', refreshRoomState)
     }
-  }, [isInRoom, roomId, userId])
+  }, [isInRoom, roomId, refreshRoomState])
+
+  useEffect(() => {
+    if (!WS_URL || !isInRoom || !roomId) {
+      return
+    }
+
+    const socket =
+      socketRef.current ??
+      io(WS_URL, {
+        transports: ['websocket']
+      })
+    socketRef.current = socket
+
+    const joinRoomChannel = () => {
+      socket.emit('join-room-channel', { roomId, userId })
+    }
+
+    const handleConnect = () => {
+      joinRoomChannel()
+    }
+
+    const handleRoomUpdated = (event) => {
+      if (!event || event.roomId !== roomId) {
+        return
+      }
+      refreshRoomState()
+    }
+
+    if (socket.connected) {
+      handleConnect()
+    }
+
+    socket.on('connect', handleConnect)
+    socket.on('room-updated', handleRoomUpdated)
+
+    return () => {
+      socket.off('connect', handleConnect)
+      socket.off('room-updated', handleRoomUpdated)
+      socket.emit('leave-room-channel', { roomId, userId })
+    }
+  }, [isInRoom, roomId, refreshRoomState, userId])
+
+  const notifyRoomUpdated = useCallback(
+    (eventType) => {
+      if (!roomId || !socketRef.current) {
+        return
+      }
+
+      socketRef.current.emit('notify-room-update', {
+        roomId,
+        userId,
+        eventType
+      })
+    },
+    [roomId, userId]
+  )
 
   useEffect(() => {
     return () => {
+      if (socketRef.current) {
+        socketRef.current.disconnect()
+        socketRef.current = null
+      }
       if (playerRef.current?.destroy) {
         playerRef.current.destroy()
       }
@@ -368,6 +406,7 @@ function App() {
       })
 
       syncRoomState(data.room, roomId)
+      notifyRoomUpdated('load-youtube')
       setIsPlaying(false)
       setSuccess('YouTube loaded for everyone in room.')
       setTimeout(() => setSuccess(''), 3000)
@@ -404,6 +443,7 @@ function App() {
         })
 
         syncRoomState(data.room, roomId)
+        notifyRoomUpdated('load-audio')
         setIsPlaying(false)
         setSuccess('Audio uploaded to room.')
         setTimeout(() => setSuccess(''), 3000)
@@ -425,6 +465,7 @@ function App() {
     try {
       const data = await apiPost('control', { roomId, userId, action })
       syncRoomState(data.room, roomId)
+      notifyRoomUpdated('control')
     } catch (controlError) {
       setError(controlError.message)
     }
