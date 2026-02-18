@@ -15,7 +15,7 @@ export default async function handler(req, res) {
   try {
     ensureStoreAvailable()
 
-    const { roomId, userId, action } = req.body ?? {}
+    const { roomId, userId, action, positionSec } = req.body ?? {}
 
     if (!roomId || !userId || !action) {
       return sendJson(req, res, 400, { error: 'roomId, userId and action are required' })
@@ -32,9 +32,15 @@ export default async function handler(req, res) {
     }
 
     const now = Date.now()
+    const nextPositionSec =
+      typeof positionSec === 'number' && Number.isFinite(positionSec) && positionSec >= 0
+        ? positionSec
+        : room.playback?.positionSec ?? 0
+
     room.playback = {
       seq: (room.playback?.seq ?? 0) + 1,
       status: action === 'play' ? 'playing' : action === 'pause' ? 'paused' : 'stopped',
+      positionSec: action === 'stop' ? 0 : nextPositionSec,
       actorId: userId,
       updatedAt: now
     }
