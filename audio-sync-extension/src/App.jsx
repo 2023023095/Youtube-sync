@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { v4 as uuidv4 } from 'uuid'
 
-const API_BASE_URL = 'https://youtube-sync-six.vercel.app'
+const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || 'https://youtube-sync-six.vercel.app').replace(/\/$/, '')
 const POLL_INTERVAL_MS = 900
 
 const getStoredUserId = () => {
