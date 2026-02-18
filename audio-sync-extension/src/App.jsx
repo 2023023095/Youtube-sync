@@ -47,6 +47,7 @@ function App() {
   const lastPlaybackSeqRef = useRef(0)
   const isPlayerReadyRef = useRef(false)
   const pendingActionRef = useRef(null)
+  const loadedVideoIdRef = useRef('')
 
   const currentUser = useMemo(() => users.find((user) => user.id === userId), [users, userId])
   const isHost = Boolean(currentUser?.isHost)
@@ -101,7 +102,11 @@ function App() {
     }
 
     if (playerRef.current) {
+      if (loadedVideoIdRef.current === videoId) {
+        return
+      }
       playerRef.current.loadVideoById(videoId)
+      loadedVideoIdRef.current = videoId
       return
     }
 
@@ -118,6 +123,7 @@ function App() {
       events: {
         onReady: () => {
           isPlayerReadyRef.current = true
+          loadedVideoIdRef.current = videoId
 
           if (pendingActionRef.current) {
             const action = pendingActionRef.current
@@ -165,6 +171,7 @@ function App() {
       setAudioUrl(room.media.url || '')
       setNowPlaying(room.media.fileName || 'Shared audio')
       setYoutubeVideoId('')
+      loadedVideoIdRef.current = ''
     } else if (room.media?.type === 'youtube') {
       setMediaType('youtube')
       setYoutubeVideoId(room.media.videoId || '')
@@ -250,6 +257,7 @@ function App() {
         playerRef.current.destroy()
       }
       playerRef.current = null
+      loadedVideoIdRef.current = ''
     }
   }, [])
 
