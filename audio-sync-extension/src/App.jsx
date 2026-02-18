@@ -2,7 +2,9 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { v4 as uuidv4 } from 'uuid'
 
 const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || 'https://youtube-sync-two.vercel.app').replace(/\/$/, '')
-const POLL_INTERVAL_MS = 900
+const POLL_INTERVAL_ACTIVE_MS = 1500
+const POLL_INTERVAL_IDLE_MS = 5000
+const POLL_INTERVAL_HIDDEN_MS = 15000
 
 const getStoredUserId = () => {
   const key = 'audio-sync-user-id'
@@ -48,6 +50,7 @@ function App() {
   const isPlayerReadyRef = useRef(false)
   const pendingActionRef = useRef(null)
   const loadedVideoIdRef = useRef('')
+  const playbackStatusRef = useRef('stopped')
 
   const currentUser = useMemo(() => users.find((user) => user.id === userId), [users, userId])
   const isHost = Boolean(currentUser?.isHost)
@@ -188,6 +191,8 @@ function App() {
       return
     }
 
+    playbackStatusRef.current = playback.status || 'stopped'
+
     if (playback.seq === lastPlaybackSeqRef.current) {
       return
     }
@@ -225,6 +230,17 @@ function App() {
     }
 
     let stopped = false
+    let timeoutId = null
+
+    const getPollDelay = () => {
+      if (document.hidden) {
+        return POLL_INTERVAL_HIDDEN_MS
+      }
+      if (playbackStatusRef.current === 'playing') {
+        return POLL_INTERVAL_ACTIVE_MS
+      }
+      return POLL_INTERVAL_IDLE_MS
+    }
 
     const pollRoom = async () => {
       try {
@@ -239,15 +255,20 @@ function App() {
         if (!stopped) {
           setError(pollError.message)
         }
+      } finally {
+        if (!stopped) {
+          timeoutId = setTimeout(pollRoom, getPollDelay())
+        }
       }
     }
 
     pollRoom()
-    const interval = setInterval(pollRoom, POLL_INTERVAL_MS)
 
     return () => {
       stopped = true
-      clearInterval(interval)
+      if (timeoutId) {
+        clearTimeout(timeoutId)
+      }
     }
   }, [isInRoom, roomId, userId])
 
