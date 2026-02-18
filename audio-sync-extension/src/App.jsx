@@ -1,12 +1,32 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { io } from 'socket.io-client'
 import { v4 as uuidv4 } from 'uuid'
 
-const serverUrl = 'http://localhost:3001'
+const API_BASE_URL = 'https://youtube-sync-six.vercel.app'
+const POLL_INTERVAL_MS = 900
+
+const getStoredUserId = () => {
+  const key = 'audio-sync-user-id'
+  const existing = localStorage.getItem(key)
+  if (existing) {
+    return existing
+  }
+
+  const created = uuidv4()
+  localStorage.setItem(key, created)
+  return created
+}
+
+const parseResponse = async (response) => {
+  const data = await response.json().catch(() => ({}))
+  if (!response.ok) {
+    throw new Error(data.error || 'Request failed')
+  }
+
+  return data
+}
 
 function App() {
-  const [socket, setSocket] = useState(null)
-  const [socketId, setSocketId] = useState('')
+  const [userId] = useState(getStoredUserId)
   const [roomId, setRoomId] = useState('')
   const [username, setUsername] = useState('')
   const [isInRoom, setIsInRoom] = useState(false)
@@ -19,14 +39,16 @@ function App() {
   const [isPlaying, setIsPlaying] = useState(false)
   const [error, setError] = useState('')
   const [success, setSuccess] = useState('')
+  const [isBusy, setIsBusy] = useState(false)
 
   const playerRef = useRef(null)
   const audioRef = useRef(null)
   const mediaTypeRef = useRef('')
+  const lastPlaybackSeqRef = useRef(0)
   const isPlayerReadyRef = useRef(false)
   const pendingActionRef = useRef(null)
 
-  const currentUser = useMemo(() => users.find((u) => u.id === socketId), [users, socketId])
+  const currentUser = useMemo(() => users.find((user) => user.id === userId), [users, userId])
   const isHost = Boolean(currentUser?.isHost)
 
   useEffect(() => {
@@ -45,29 +67,9 @@ function App() {
   }, [])
 
   const extractVideoId = (url) => {
-    const regex = /(?:youtube\.com\/(?:[^\/]+\/.+\/|(?:v|e(?:mbed)?)\/|.*[?&]v=)|youtu\.be\/)([^"&?\/\s]{11})/
+    const regex = /(?:youtube\.com\/(?:[^/]+\/.+\/|(?:v|e(?:mbed)?)\/|.*[?&]v=)|youtu\.be\/)([^"&?/\s]{11})/
     const match = url.match(regex)
     return match ? match[1] : null
-  }
-
-  const flushPendingAction = () => {
-    if (!playerRef.current || !isPlayerReadyRef.current || !pendingActionRef.current) {
-      return
-    }
-
-    const action = pendingActionRef.current
-    pendingActionRef.current = null
-
-    if (action === 'play') {
-      playerRef.current.playVideo()
-      setIsPlaying(true)
-    } else if (action === 'pause') {
-      playerRef.current.pauseVideo()
-      setIsPlaying(false)
-    } else if (action === 'stop') {
-      playerRef.current.stopVideo()
-      setIsPlaying(false)
-    }
   }
 
   const applyPlayerAction = (action) => {
@@ -82,7 +84,7 @@ function App() {
     } else if (action === 'pause') {
       playerRef.current.pauseVideo()
       setIsPlaying(false)
-    } else if (action === 'stop') {
+    } else {
       playerRef.current.stopVideo()
       setIsPlaying(false)
     }
@@ -116,7 +118,12 @@ function App() {
       events: {
         onReady: () => {
           isPlayerReadyRef.current = true
-          flushPendingAction()
+
+          if (pendingActionRef.current) {
+            const action = pendingActionRef.current
+            pendingActionRef.current = null
+            applyPlayerAction(action)
+          }
         },
         onStateChange: (event) => {
           if (event.data === window.YT.PlayerState.PLAYING) {
@@ -130,117 +137,152 @@ function App() {
     })
   }
 
-  useEffect(() => {
-    const newSocket = io(serverUrl)
-    setSocket(newSocket)
-
-    newSocket.on('connect', () => {
-      setSocketId(newSocket.id)
+  const apiPost = async (path, body) => {
+    const response = await fetch(`${API_BASE_URL}/api/${path}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(body)
     })
 
-    newSocket.on('user-joined', (user) => {
-      setUsers((prev) => [...prev, user])
-    })
+    return parseResponse(response)
+  }
 
-    newSocket.on('users-list', (usersList) => {
-      setUsers(usersList)
-    })
+  const syncRoomState = (room, incomingRoomId) => {
+    if (!room) {
+      return
+    }
 
-    newSocket.on('user-left', (userId) => {
-      setUsers((prev) => prev.filter((u) => u.id !== userId))
-    })
+    if (incomingRoomId) {
+      setRoomId(incomingRoomId)
+    }
 
-    newSocket.on('youtube-loaded', (data) => {
-      setMediaType('youtube')
-      setYoutubeVideoId(data.videoId)
-      setYoutubeUrl(data.url)
-      setNowPlaying(`YouTube: ${data.videoId}`)
-      setIsPlaying(false)
-      createYouTubePlayer(data.videoId)
-    })
+    setUsers(room.users || [])
 
-    newSocket.on('audio-loaded', (data) => {
+    if (room.media?.type === 'local') {
       setMediaType('local')
-      setAudioUrl(data.url)
-      setNowPlaying(data.fileName || 'Shared audio')
-      setIsPlaying(false)
-    })
-
-    newSocket.on('play-audio', () => {
-      if (mediaTypeRef.current === 'local' && audioRef.current) {
-        audioRef.current.play()
-        setIsPlaying(true)
-      } else {
-        applyPlayerAction('play')
+      setAudioUrl(room.media.url || '')
+      setNowPlaying(room.media.fileName || 'Shared audio')
+      setYoutubeVideoId('')
+    } else if (room.media?.type === 'youtube') {
+      setMediaType('youtube')
+      setYoutubeVideoId(room.media.videoId || '')
+      setYoutubeUrl(room.media.url || '')
+      setNowPlaying(room.media.fileName || `YouTube: ${room.media.videoId}`)
+      setAudioUrl('')
+      if (room.media.videoId) {
+        createYouTubePlayer(room.media.videoId)
       }
-    })
+    }
 
-    newSocket.on('pause-audio', () => {
-      if (mediaTypeRef.current === 'local' && audioRef.current) {
+    const playback = room.playback
+    if (!playback || playback.seq === undefined) {
+      return
+    }
+
+    if (playback.seq === lastPlaybackSeqRef.current) {
+      return
+    }
+
+    lastPlaybackSeqRef.current = playback.seq
+
+    const targetMediaType = room.media?.type || mediaTypeRef.current
+    if (targetMediaType === 'local' && audioRef.current) {
+      if (playback.status === 'playing') {
+        audioRef.current.play().catch(() => {})
+        setIsPlaying(true)
+      } else if (playback.status === 'paused') {
         audioRef.current.pause()
         setIsPlaying(false)
       } else {
-        applyPlayerAction('pause')
-      }
-    })
-
-    newSocket.on('stop-audio', () => {
-      if (mediaTypeRef.current === 'local' && audioRef.current) {
         audioRef.current.pause()
         audioRef.current.currentTime = 0
         setIsPlaying(false)
-      } else {
-        applyPlayerAction('stop')
       }
-    })
+      return
+    }
 
-    newSocket.on('room-joined', (data) => {
-      setIsInRoom(true)
-      setUsers(data.users)
-      if (data.audioUrl?.url) {
-        setMediaType('local')
-        setAudioUrl(data.audioUrl.url)
-        setNowPlaying(data.audioUrl.fileName || 'Shared audio')
-      }
-      if (data.youtube?.videoId) {
-        setMediaType('youtube')
-        setYoutubeVideoId(data.youtube.videoId)
-        setYoutubeUrl(data.youtube.url)
-        setNowPlaying(`YouTube: ${data.youtube.videoId}`)
-        createYouTubePlayer(data.youtube.videoId)
-      }
-    })
+    if (playback.status === 'playing') {
+      applyPlayerAction('play')
+    } else if (playback.status === 'paused') {
+      applyPlayerAction('pause')
+    } else {
+      applyPlayerAction('stop')
+    }
+  }
 
-    newSocket.on('error', (err) => {
-      setError(err.message)
-      setTimeout(() => setError(''), 4000)
-    })
+  useEffect(() => {
+    if (!isInRoom || !roomId) {
+      return
+    }
+
+    let stopped = false
+
+    const pollRoom = async () => {
+      try {
+        const response = await fetch(
+          `${API_BASE_URL}/api/room?roomId=${encodeURIComponent(roomId)}&userId=${encodeURIComponent(userId)}`
+        )
+        const data = await parseResponse(response)
+        if (!stopped) {
+          syncRoomState(data.room, roomId)
+        }
+      } catch (pollError) {
+        if (!stopped) {
+          setError(pollError.message)
+        }
+      }
+    }
+
+    pollRoom()
+    const interval = setInterval(pollRoom, POLL_INTERVAL_MS)
 
     return () => {
-      newSocket.disconnect()
+      stopped = true
+      clearInterval(interval)
+    }
+  }, [isInRoom, roomId, userId])
+
+  useEffect(() => {
+    return () => {
       if (playerRef.current?.destroy) {
         playerRef.current.destroy()
       }
       playerRef.current = null
-      isPlayerReadyRef.current = false
-      pendingActionRef.current = null
     }
   }, [])
 
-  const createRoom = () => {
+  const createRoom = async () => {
     if (!username.trim()) {
       setError('Please enter your name')
       return
     }
 
-    const newRoomId = uuidv4().slice(0, 8)
-    setRoomId(newRoomId)
-    socket.emit('create-room', { roomId: newRoomId, username: username.trim() })
-    setSuccess('Room created. Share the code with friends.')
-    setTimeout(() => setSuccess(''), 3000)
+    setIsBusy(true)
+    setError('')
+
+    try {
+      const newRoomId = uuidv4().slice(0, 8)
+      const data = await apiPost('create-room', {
+        roomId: newRoomId,
+        username: username.trim(),
+        userId
+      })
+
+      lastPlaybackSeqRef.current = data.room?.playback?.seq ?? 0
+      setIsInRoom(true)
+      syncRoomState(data.room, newRoomId)
+      setSuccess('Room created. Share the code with friends.')
+      setTimeout(() => setSuccess(''), 3000)
+    } catch (createError) {
+      setError(createError.message)
+    } finally {
+      setIsBusy(false)
+    }
   }
 
-  const joinRoom = () => {
+  const joinRoom = async () => {
     if (!username.trim()) {
       setError('Please enter your name')
       return
@@ -251,17 +293,31 @@ function App() {
       return
     }
 
-    socket.emit('join-room', { roomId: roomId.trim(), username: username.trim() })
+    setIsBusy(true)
+    setError('')
+
+    try {
+      const data = await apiPost('join-room', {
+        roomId: roomId.trim(),
+        username: username.trim(),
+        userId
+      })
+
+      lastPlaybackSeqRef.current = data.room?.playback?.seq ?? 0
+      setIsInRoom(true)
+      syncRoomState(data.room, roomId.trim())
+      setSuccess('Joined room successfully.')
+      setTimeout(() => setSuccess(''), 3000)
+    } catch (joinError) {
+      setError(joinError.message)
+    } finally {
+      setIsBusy(false)
+    }
   }
 
-  const handleYoutubeLoad = () => {
+  const handleYoutubeLoad = async () => {
     if (!isHost) {
       setError('Only host can load YouTube audio')
-      return
-    }
-
-    if (!youtubeUrl.trim()) {
-      setError('Please enter a YouTube URL')
       return
     }
 
@@ -271,93 +327,90 @@ function App() {
       return
     }
 
-    setMediaType('youtube')
-    setYoutubeVideoId(videoId)
-    setNowPlaying(`YouTube: ${videoId}`)
-    createYouTubePlayer(videoId)
-    socket.emit('load-youtube', { roomId, videoId, url: youtubeUrl.trim() })
-    setSuccess('YouTube loaded for everyone in room.')
-    setTimeout(() => setSuccess(''), 3000)
+    setIsBusy(true)
+    setError('')
+
+    try {
+      const data = await apiPost('load-youtube', {
+        roomId,
+        userId,
+        videoId,
+        url: youtubeUrl.trim()
+      })
+
+      syncRoomState(data.room, roomId)
+      setIsPlaying(false)
+      setSuccess('YouTube loaded for everyone in room.')
+      setTimeout(() => setSuccess(''), 3000)
+    } catch (loadError) {
+      setError(loadError.message)
+    } finally {
+      setIsBusy(false)
+    }
   }
 
-  const handleFileSelect = (event) => {
+  const handleFileSelect = async (event) => {
     const file = event.target.files?.[0]
     if (!file) {
       return
     }
 
     const reader = new FileReader()
-    reader.onload = () => {
+    reader.onload = async () => {
       const dataUrl = typeof reader.result === 'string' ? reader.result : ''
       if (!dataUrl) {
         setError('Failed to read audio file')
         return
       }
 
-      setMediaType('local')
-      setAudioUrl(dataUrl)
-      setNowPlaying(file.name)
-      setIsPlaying(false)
-      socket.emit('load-audio', { roomId, url: dataUrl, fileName: file.name })
-      setSuccess('Audio uploaded to room.')
-      setTimeout(() => setSuccess(''), 3000)
+      setIsBusy(true)
+      setError('')
+
+      try {
+        const data = await apiPost('load-audio', {
+          roomId,
+          userId,
+          url: dataUrl,
+          fileName: file.name
+        })
+
+        syncRoomState(data.room, roomId)
+        setIsPlaying(false)
+        setSuccess('Audio uploaded to room.')
+        setTimeout(() => setSuccess(''), 3000)
+      } catch (uploadError) {
+        setError(uploadError.message)
+      } finally {
+        setIsBusy(false)
+      }
     }
+
     reader.readAsDataURL(file)
   }
 
-  const playAudio = () => {
+  const sendControl = async (action) => {
     if (!roomId) {
       return
     }
 
-    if (mediaType === 'local') {
-      if (audioRef.current) {
-        audioRef.current.play()
-        setIsPlaying(true)
-      }
-      socket.emit('play', { roomId })
-      return
+    try {
+      const data = await apiPost('control', { roomId, userId, action })
+      syncRoomState(data.room, roomId)
+    } catch (controlError) {
+      setError(controlError.message)
     }
+  }
 
-    if (youtubeVideoId) {
-      applyPlayerAction('play')
-    }
-    socket.emit('play', { roomId })
+  const playAudio = () => {
+    sendControl('play')
   }
 
   const pauseAudio = () => {
-    if (!roomId) {
-      return
-    }
-
-    if (mediaType === 'local') {
-      if (audioRef.current) {
-        audioRef.current.pause()
-        setIsPlaying(false)
-      }
-      socket.emit('pause', { roomId })
-      return
-    }
-
-    if (youtubeVideoId) {
-      applyPlayerAction('pause')
-    }
-    socket.emit('pause', { roomId })
+    sendControl('pause')
   }
 
   const stopAudio = () => {
-    if (!roomId) {
-      return
-    }
-
-    if (mediaType === 'local' && audioRef.current) {
-      audioRef.current.pause()
-      audioRef.current.currentTime = 0
-      setIsPlaying(false)
-    } else if (playerRef.current) {
-      applyPlayerAction('stop')
-    }
-    socket.emit('stop', { roomId })
+    sendControl('stop')
   }
 
   const copyRoomId = () => {
@@ -379,12 +432,12 @@ function App() {
           <input
             type="text"
             value={username}
-            onChange={(e) => setUsername(e.target.value)}
+            onChange={(event) => setUsername(event.target.value)}
             placeholder="Enter your name"
           />
         </div>
 
-        <button className="btn btn-primary" onClick={createRoom} disabled={!socket}>
+        <button className="btn btn-primary" onClick={createRoom} disabled={isBusy}>
           Create New Room
         </button>
 
@@ -395,12 +448,12 @@ function App() {
           <input
             type="text"
             value={roomId}
-            onChange={(e) => setRoomId(e.target.value)}
+            onChange={(event) => setRoomId(event.target.value)}
             placeholder="Enter room code"
           />
         </div>
 
-        <button className="btn btn-secondary" onClick={joinRoom} disabled={!socket}>
+        <button className="btn btn-secondary" onClick={joinRoom} disabled={isBusy}>
           Join Room
         </button>
       </div>
@@ -423,7 +476,7 @@ function App() {
 
       <div className="audio-controls">
         <div className="file-input">
-          <input type="file" id="audio-file" accept="audio/*" onChange={handleFileSelect} />
+          <input type="file" id="audio-file" accept="audio/*" onChange={handleFileSelect} disabled={isBusy} />
           <label htmlFor="audio-file">Choose Audio File</label>
         </div>
 
@@ -432,24 +485,24 @@ function App() {
           <input
             type="text"
             value={youtubeUrl}
-            onChange={(e) => setYoutubeUrl(e.target.value)}
+            onChange={(event) => setYoutubeUrl(event.target.value)}
             placeholder="https://www.youtube.com/watch?v=..."
-            disabled={!isHost}
+            disabled={!isHost || isBusy}
           />
         </div>
 
-        <button className="btn btn-primary" onClick={handleYoutubeLoad} disabled={!isHost}>
+        <button className="btn btn-primary" onClick={handleYoutubeLoad} disabled={!isHost || isBusy}>
           Load YouTube Audio
         </button>
 
         <div className="playback-controls">
-          <button className="play-btn" onClick={playAudio} disabled={!roomId}>
+          <button className="play-btn" onClick={playAudio} disabled={!roomId || isBusy}>
             Play
           </button>
-          <button className="pause-btn" onClick={pauseAudio} disabled={!roomId}>
+          <button className="pause-btn" onClick={pauseAudio} disabled={!roomId || isBusy}>
             Pause
           </button>
-          <button className="stop-btn" onClick={stopAudio} disabled={!roomId}>
+          <button className="stop-btn" onClick={stopAudio} disabled={!roomId || isBusy}>
             Stop
           </button>
         </div>
