@@ -1,0 +1,13 @@
+{
+  "name": "audio-sync-backend",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node -e \"console.log('Use: vercel dev')\"",
+    "dev:vercel": "vercel dev"
+  },
+  "dependencies": {
+    "@upstash/redis": "^1.35.6"
+  }
+}
