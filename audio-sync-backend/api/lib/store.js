@@ -3,10 +3,38 @@ import { Redis } from '@upstash/redis'
 const memoryStore = globalThis.__audioSyncRooms ?? new Map()
 globalThis.__audioSyncRooms = memoryStore
 
-const redisUrl = process.env.UPSTASH_REDIS_REST_URL || process.env.KV_REST_API_URL
-const redisToken = process.env.UPSTASH_REDIS_REST_TOKEN || process.env.KV_REST_API_TOKEN
-const isRedisConfigured = Boolean(redisUrl && redisToken)
-const redis = isRedisConfigured ? new Redis({ url: redisUrl, token: redisToken }) : null
+const findRedisEnvConfig = () => {
+  const candidates = [
+    ['UPSTASH_REDIS_REST_URL', 'UPSTASH_REDIS_REST_TOKEN'],
+    ['KV_REST_API_URL', 'KV_REST_API_TOKEN'],
+    ['REDIS_REST_URL', 'REDIS_REST_TOKEN']
+  ]
+
+  for (const [urlKey, tokenKey] of candidates) {
+    if (process.env[urlKey] && process.env[tokenKey]) {
+      return { url: process.env[urlKey], token: process.env[tokenKey], urlKey, tokenKey }
+    }
+  }
+
+  for (const [key, value] of Object.entries(process.env)) {
+    if (!value || !key.endsWith('_REST_API_URL')) {
+      continue
+    }
+
+    const prefix = key.slice(0, -'_REST_API_URL'.length)
+    const tokenKey = `${prefix}_REST_API_TOKEN`
+    const tokenValue = process.env[tokenKey]
+    if (tokenValue) {
+      return { url: value, token: tokenValue, urlKey: key, tokenKey }
+    }
+  }
+
+  return null
+}
+
+const redisConfig = findRedisEnvConfig()
+const isRedisConfigured = Boolean(redisConfig)
+const redis = isRedisConfigured ? new Redis({ url: redisConfig.url, token: redisConfig.token }) : null
 const requireRedis = process.env.REQUIRE_REDIS === 'true'
 
 export const ensureStoreAvailable = () => {
@@ -96,5 +124,6 @@ export const getStoreStatus = () => ({
   mode: isRedisConfigured ? 'redis' : 'memory',
   isRedisConfigured,
   requireRedis,
-  provider: process.env.UPSTASH_REDIS_REST_URL ? 'upstash' : process.env.KV_REST_API_URL ? 'vercel-kv' : 'none'
+  provider: redisConfig?.urlKey?.includes('UPSTASH') ? 'upstash' : redisConfig?.urlKey?.includes('KV') ? 'vercel-kv' : redisConfig ? 'redis-rest' : 'none',
+  configKey: redisConfig?.urlKey || null
 })
