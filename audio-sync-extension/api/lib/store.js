@@ -3,10 +3,10 @@ import { Redis } from '@upstash/redis'
 const memoryStore = globalThis.__audioSyncRooms ?? new Map()
 globalThis.__audioSyncRooms = memoryStore
 
-const isRedisConfigured = Boolean(
-  process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN
-)
-const redis = isRedisConfigured ? Redis.fromEnv() : null
+const redisUrl = process.env.UPSTASH_REDIS_REST_URL || process.env.KV_REST_API_URL
+const redisToken = process.env.UPSTASH_REDIS_REST_TOKEN || process.env.KV_REST_API_TOKEN
+const isRedisConfigured = Boolean(redisUrl && redisToken)
+const redis = isRedisConfigured ? new Redis({ url: redisUrl, token: redisToken }) : null
 const requireRedis = process.env.REQUIRE_REDIS === 'true'
 
 export const ensureStoreAvailable = () => {
@@ -95,5 +95,6 @@ export const touchUser = (room, userId) => {
 export const getStoreStatus = () => ({
   mode: isRedisConfigured ? 'redis' : 'memory',
   isRedisConfigured,
-  requireRedis
+  requireRedis,
+  provider: process.env.UPSTASH_REDIS_REST_URL ? 'upstash' : process.env.KV_REST_API_URL ? 'vercel-kv' : 'none'
 })
